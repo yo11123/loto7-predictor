@@ -1,0 +1,8 @@
+.api_keys.json
+.purchased_checks.json
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+create_shortcut.*
+launch.bat
+launch_silent.vbs
