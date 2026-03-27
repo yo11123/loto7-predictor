@@ -238,14 +238,32 @@ def generate_combinations(
 
     candidates.sort(key=lambda x: x[1], reverse=True)
 
-    # 明示的な重複排除（safety net）
+    # ── 多様性を確保した貪欲選択 ──
+    # 既に選んだ組と最低 min_diff 個以上異なる番号を持つ組のみ採用
+    # 要求数を満たせない場合は段階的に緩和する
     seen: set[tuple[int, ...]] = set()
     results: list[list[int]] = []
-    for combo, _ in candidates:
-        key = tuple(sorted(combo))
-        if key not in seen:
-            seen.add(key)
-            results.append(list(key))
+
+    for min_diff in (3, 2, 1):
+        for combo, _ in candidates:
+            key = tuple(sorted(combo))
+            if key in seen:
+                continue
+
+            # 既存の全組と比較して多様性チェック
+            is_diverse = True
+            combo_set = set(combo)
+            for existing in results:
+                diff_count = len(combo_set.symmetric_difference(set(existing))) // 2
+                if diff_count < min_diff:
+                    is_diverse = False
+                    break
+
+            if is_diverse:
+                seen.add(key)
+                results.append(list(key))
+            if len(results) >= n:
+                break
         if len(results) >= n:
             break
 
