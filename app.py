@@ -874,17 +874,33 @@ with tab_pred:
             if bt_results:
                 avg_top15 = sum(r["hits_top15"] for r in bt_results) / len(bt_results)
                 avg_best = sum(r["best_combo_hits"] for r in bt_results) / len(bt_results)
+                avg_all = sum(r["avg_combo_hits"] for r in bt_results) / len(bt_results)
+                total_3plus = sum(r["combos_with_3plus"] for r in bt_results)
+                total_4plus = sum(r["combos_with_4plus"] for r in bt_results)
+                total_combos = sum(r["all_combos_count"] for r in bt_results)
 
                 st.markdown(
                     f'<div class="glass-card">'
-                    f'<div style="display:flex;gap:40px;justify-content:center">'
+                    f'<div style="display:flex;gap:24px;justify-content:center;flex-wrap:wrap">'
                     f'<div style="text-align:center">'
-                    f'<div style="color:#64748b;font-size:12px">上位15番号の平均的中</div>'
-                    f'<div style="font-size:1.8rem;font-weight:700;color:#60a5fa">{avg_top15:.1f}<span style="font-size:0.9rem;color:#64748b"> / 7</span></div>'
+                    f'<div style="color:#64748b;font-size:11px">上位15番号<br>平均的中</div>'
+                    f'<div style="font-size:1.6rem;font-weight:700;color:#60a5fa">{avg_top15:.1f}<span style="font-size:0.8rem;color:#64748b"> / 7</span></div>'
                     f'</div>'
                     f'<div style="text-align:center">'
-                    f'<div style="color:#64748b;font-size:12px">最高組の平均的中</div>'
-                    f'<div style="font-size:1.8rem;font-weight:700;color:#a78bfa">{avg_best:.1f}<span style="font-size:0.9rem;color:#64748b"> / 7</span></div>'
+                    f'<div style="color:#64748b;font-size:11px">最高組<br>平均的中</div>'
+                    f'<div style="font-size:1.6rem;font-weight:700;color:#a78bfa">{avg_best:.1f}<span style="font-size:0.8rem;color:#64748b"> / 7</span></div>'
+                    f'</div>'
+                    f'<div style="text-align:center">'
+                    f'<div style="color:#64748b;font-size:11px">全組<br>平均的中</div>'
+                    f'<div style="font-size:1.6rem;font-weight:700;color:#34d399">{avg_all:.2f}<span style="font-size:0.8rem;color:#64748b"> / 7</span></div>'
+                    f'</div>'
+                    f'<div style="text-align:center">'
+                    f'<div style="color:#64748b;font-size:11px">3個以上<br>的中した組</div>'
+                    f'<div style="font-size:1.6rem;font-weight:700;color:#fbbf24">{total_3plus}<span style="font-size:0.8rem;color:#64748b"> / {total_combos}</span></div>'
+                    f'</div>'
+                    f'<div style="text-align:center">'
+                    f'<div style="color:#64748b;font-size:11px">4個以上<br>的中した組</div>'
+                    f'<div style="font-size:1.6rem;font-weight:700;color:#f87171">{total_4plus}<span style="font-size:0.8rem;color:#64748b"> / {total_combos}</span></div>'
                     f'</div>'
                     f'</div></div>',
                     unsafe_allow_html=True,
@@ -903,7 +919,17 @@ with tab_pred:
                     best_str = ""
                     if r["best_combo"]:
                         best_badges = _num_badges_with_consec(r["best_combo"])
-                        best_str = f"最高組（{r['best_combo_hits']}個的中）: {best_badges}"
+                        best_str = f'最高組（{r["best_combo_hits"]}個的中）: {best_badges}'
+
+                    # 的中数分布バー
+                    dist = r.get("hit_distribution", {})
+                    dist_parts = []
+                    for hits_n in range(max(dist.keys()) + 1 if dist else 0):
+                        cnt = dist.get(hits_n, 0)
+                        if cnt > 0:
+                            color = "#f87171" if hits_n >= 4 else "#fbbf24" if hits_n >= 3 else "#60a5fa" if hits_n >= 2 else "#475569"
+                            dist_parts.append(f'<span style="color:{color}">{hits_n}個:{cnt}組</span>')
+                    dist_html = "　".join(dist_parts) if dist_parts else ""
 
                     st.markdown(
                         f'<div style="border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;margin:8px 0">'
@@ -914,13 +940,21 @@ with tab_pred:
                         f'<div style="margin-bottom:6px">実際: {actual_badges}</div>'
                         f'<div style="font-size:13px;color:#94a3b8">的中: {hit_str}　見逃し: {miss_str}</div>'
                         f'{"<div style=margin-top:6px;font-size:13px>" + best_str + "</div>" if best_str else ""}'
+                        f'<div style="font-size:12px;margin-top:6px;color:#94a3b8">'
+                        f'全{r["all_combos_count"]}組: 平均{r["avg_combo_hits"]}個的中　'
+                        f'3個↑: {r["combos_with_3plus"]}組　4個↑: {r["combos_with_4plus"]}組</div>'
+                        f'{"<div style=font-size:11px;margin-top:4px;color:#64748b>分布: " + dist_html + "</div>" if dist_html else ""}'
                         f'</div>',
                         unsafe_allow_html=True,
                     )
 
-                st.caption(
-                    "バックテスト結果はフィードバックとしてスコアに自動反映されます。"
-                    "過大予測された番号はスコア微減、過小予測された番号はスコア微増されます。"
+                st.markdown(
+                    '<div style="background:rgba(96,165,250,0.1);border:1px solid rgba(96,165,250,0.2);'
+                    'border-radius:8px;padding:12px;margin-top:12px;font-size:13px;color:#94a3b8">'
+                    '💡 <strong style="color:#60a5fa">フィードバック自動反映:</strong> '
+                    'バックテストで過大予測された番号はスコアを微減、見逃した番号はスコアを微増。'
+                    '次回の「おすすめの組み合わせ」に反映されます。</div>',
+                    unsafe_allow_html=True,
                 )
             else:
                 st.info("バックテストに十分なデータがありません。")

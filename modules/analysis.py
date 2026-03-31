@@ -918,6 +918,11 @@ def run_backtest(df: pd.DataFrame, last_n: int = 5) -> list[dict]:
     results = []
     test_start = max(0, len(df) - last_n)
 
+    # 番号ごとの予測・的中・見逃し集計
+    _bt_num_predicted = {}
+    _bt_num_hit = {}
+    _bt_num_missed = {}
+
     for idx in range(test_start, len(df)):
         train_df = df.iloc[:idx].copy()
         if len(train_df) < 10:
@@ -933,17 +938,34 @@ def run_backtest(df: pd.DataFrame, last_n: int = 5) -> list[dict]:
         hits_top15 = len(set(top15) & actual_set)
 
         try:
-            combos = generate_combinations(train_df, n=20)
+            combos = generate_combinations(train_df, n=100)
         except Exception:
             combos = []
 
+        # 全組の的中数を計算
+        combo_results = []
         best_hits = 0
         best_combo = []
         for combo in combos:
             h = len(set(combo) & actual_set)
+            combo_results.append({"combo": combo, "hits": h})
             if h > best_hits:
                 best_hits = h
                 best_combo = combo
+
+        # 的中数の分布
+        hit_dist = Counter(cr["hits"] for cr in combo_results)
+        avg_hits = sum(cr["hits"] for cr in combo_results) / len(combo_results) if combo_results else 0
+
+        # 各番号が「おすすめに入ったか」「実際に出たか」の集計
+        for combo in combos:
+            for n in combo:
+                _bt_num_predicted[n] = _bt_num_predicted.get(n, 0) + 1
+                if n in actual_set:
+                    _bt_num_hit[n] = _bt_num_hit.get(n, 0) + 1
+        for n in actual:
+            if not any(n in combo for combo in combos):
+                _bt_num_missed[n] = _bt_num_missed.get(n, 0) + 1
 
         results.append({
             "round": target_round,
@@ -952,9 +974,53 @@ def run_backtest(df: pd.DataFrame, last_n: int = 5) -> list[dict]:
             "hits_top15": hits_top15,
             "best_combo": best_combo,
             "best_combo_hits": best_hits,
+            "all_combos_count": len(combos),
+            "avg_combo_hits": round(avg_hits, 2),
+            "hit_distribution": dict(sorted(hit_dist.items())),
+            "combos_with_3plus": sum(1 for cr in combo_results if cr["hits"] >= 3),
+            "combos_with_4plus": sum(1 for cr in combo_results if cr["hits"] >= 4),
         })
 
+    # フィードバック: バックテスト結果から重みを自動更新
+    if results:
+        _update_feedback_from_backtest(_bt_num_predicted, _bt_num_hit, _bt_num_missed, len(results))
+
     return results
+
+
+def _update_feedback_from_backtest(predicted: dict, hit: dict, missed: dict, n_rounds: int):
+    """
+    バックテスト結果からフィードバック重みを更新する。
+    - よく予測に入るが的中しない番号 → ペナルティ
+    - 予測に入らないのに出る番号 → ボーナス
+    """
+    weights = {}
+    for n in ALL_NUMBERS:
+        pred_count = predicted.get(n, 0)
+        hit_count = hit.get(n, 0)
+        miss_count = missed.get(n, 0)
+
+        if pred_count > 0:
+            hit_rate = hit_count / pred_count
+            # 的中率が低い（予測したが外れやすい）→ ペナルティ
+            # 期待的中率は約 7/37 ≈ 0.189
+            expected_rate = 7 / 37
+            if hit_rate < expected_rate * 0.7:
+                weights[str(n)] = -min((expected_rate - hit_rate) * 0.1, 0.05)
+            elif hit_rate > expected_rate * 1.3:
+                weights[str(n)] = min((hit_rate - expected_rate) * 0.1, 0.05)
+
+        if miss_count > 0:
+            # 予測しなかったのに出た → ボーナス
+            bonus = min(miss_count / n_rounds * 0.03, 0.05)
+            weights[str(n)] = weights.get(str(n), 0) + bonus
+
+    try:
+        _FEEDBACK_WEIGHTS_FILE.write_text(
+            _json.dumps(weights, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
 
 
 def _get_raw_score(df: pd.DataFrame) -> dict[int, float]:
