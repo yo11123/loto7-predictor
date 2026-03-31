@@ -573,8 +573,8 @@ st.markdown(
 # ──────────────────────────────────────────────
 #  タブ構成
 # ──────────────────────────────────────────────
-tab_pred, tab_ranking, tab_analysis, tab_history, tab_ai = st.tabs(
-    ["🎯 予測", "🏆 要因別ランキング", "📊 分析", "📋 過去の結果", "🤖 AI相談"]
+tab_pred, tab_ranking, tab_analysis, tab_history, tab_sim, tab_ai = st.tabs(
+    ["🎯 予測", "🏆 要因別ランキング", "📊 分析", "📋 過去の結果", "🎰 模擬抽選", "🤖 AI相談"]
 )
 
 # ══════════════════════════════════════════════
@@ -1649,7 +1649,258 @@ with tab_history:
         st.dataframe(display_df, use_container_width=True, hide_index=True, height=500)
 
 # ══════════════════════════════════════════════
-#  タブ4: AI相談
+#  タブ5: 模擬抽選シミュレーション
+# ══════════════════════════════════════════════
+with tab_sim:
+    import random as _sim_random
+    import time as _sim_time
+
+    st.markdown(
+        '<div class="glass-card">'
+        '<div class="section-title">🎰 模擬抽選シミュレーション</div>'
+        '<div class="section-subtitle">'
+        'おすすめの組み合わせ vs ランダム7組で仮想抽選！当たるのはどっち？'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    # 手持ちのおすすめ組
+    _sim_combos = combos[:10] if combos else []
+
+    st.markdown("")
+
+    # おすすめから選ぶ数
+    _sim_col1, _sim_col2 = st.columns(2)
+    with _sim_col1:
+        _sim_rec_count = st.number_input(
+            "おすすめから何組使う？", min_value=1, max_value=min(10, len(_sim_combos)) if _sim_combos else 1,
+            value=min(5, len(_sim_combos)) if _sim_combos else 1, step=1, key="sim_rec_n",
+        )
+    with _sim_col2:
+        _sim_rnd_count = st.number_input(
+            "ランダム何組と勝負？", min_value=1, max_value=20, value=5, step=1, key="sim_rnd_n",
+        )
+
+    # おすすめ組を表示
+    st.markdown("**🎯 おすすめチーム**")
+    _sim_rec_picks = _sim_combos[:_sim_rec_count] if _sim_combos else []
+    for i, c in enumerate(_sim_rec_picks, 1):
+        badges = _num_badges_with_consec(sorted(c))
+        st.markdown(
+            f'<div style="margin:4px 0;display:flex;align-items:center;gap:8px">'
+            f'<span style="color:#60a5fa;font-weight:700;min-width:30px">#{i}</span>{badges}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ランダム組を生成
+    if "sim_random_picks" not in st.session_state or st.session_state.get("_sim_rnd_n_cache") != _sim_rnd_count:
+        st.session_state["sim_random_picks"] = [
+            sorted(_sim_random.sample(range(1, 38), 7)) for _ in range(_sim_rnd_count)
+        ]
+        st.session_state["_sim_rnd_n_cache"] = _sim_rnd_count
+
+    _sim_rnd_picks = st.session_state["sim_random_picks"]
+
+    st.markdown("**🎲 ランダムチーム**")
+    for i, c in enumerate(_sim_rnd_picks, 1):
+        badges = _num_badges_with_consec(c)
+        st.markdown(
+            f'<div style="margin:4px 0;display:flex;align-items:center;gap:8px">'
+            f'<span style="color:#a78bfa;font-weight:700;min-width:30px">#{i}</span>{badges}</div>',
+            unsafe_allow_html=True,
+        )
+
+    if st.button("🔀 ランダムチームを入れ替え", key="sim_reshuffle"):
+        st.session_state["sim_random_picks"] = [
+            sorted(_sim_random.sample(range(1, 38), 7)) for _ in range(_sim_rnd_count)
+        ]
+        st.rerun()
+
+    st.markdown("")
+    st.markdown("---")
+
+    # 抽選実行
+    _sim_col_btn, _sim_col_count = st.columns([1, 1])
+    with _sim_col_count:
+        _sim_trials = st.selectbox("抽選回数", [1, 10, 100, 1000], index=0, key="sim_trials")
+
+    with _sim_col_btn:
+        _sim_run = st.button("🎰 抽選スタート！", type="primary", use_container_width=True, key="sim_start")
+
+    if _sim_run:
+        rec_wins = 0
+        rnd_wins = 0
+        draws = 0
+        rec_total_hits = 0
+        rnd_total_hits = 0
+        rec_best_ever = 0
+        rnd_best_ever = 0
+        rec_3plus = 0
+        rnd_3plus = 0
+
+        _sim_placeholder = st.empty()
+
+        for trial in range(_sim_trials):
+            # 仮想抽選: 1-37から7個ランダム
+            winning = sorted(_sim_random.sample(range(1, 38), 7))
+            winning_set = set(winning)
+
+            # おすすめチームの最高的中
+            rec_best = 0
+            for c in _sim_rec_picks:
+                h = len(set(c) & winning_set)
+                rec_best = max(rec_best, h)
+            rec_total_hits += rec_best
+            rec_best_ever = max(rec_best_ever, rec_best)
+            if rec_best >= 3:
+                rec_3plus += 1
+
+            # ランダムチームの最高的中
+            rnd_best = 0
+            for c in _sim_rnd_picks:
+                h = len(set(c) & winning_set)
+                rnd_best = max(rnd_best, h)
+            rnd_total_hits += rnd_best
+            rnd_best_ever = max(rnd_best_ever, rnd_best)
+            if rnd_best >= 3:
+                rnd_3plus += 1
+
+            if rec_best > rnd_best:
+                rec_wins += 1
+            elif rnd_best > rec_best:
+                rnd_wins += 1
+            else:
+                draws += 1
+
+        # 結果表示
+        total = _sim_trials
+        last_winning = winning  # 最後の抽選結果
+
+        # 1回だけの場合は演出付き
+        if _sim_trials == 1:
+            st.markdown(
+                '<div class="glass-card" style="text-align:center">'
+                '<div style="color:#64748b;font-size:13px;margin-bottom:8px">抽選結果</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            win_badges = _num_badges_with_consec(last_winning)
+            st.markdown(
+                f'<div style="text-align:center;margin:16px 0">{win_badges}</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("")
+
+            # おすすめチームの結果
+            st.markdown("**🎯 おすすめチーム結果**")
+            for i, c in enumerate(_sim_rec_picks, 1):
+                hits = len(set(c) & set(last_winning))
+                hit_nums = set(c) & set(last_winning)
+                badges_html = ""
+                for n in sorted(c):
+                    cls = _num_class(n)
+                    if n in hit_nums:
+                        badges_html += (
+                            f'<span class="num-badge {cls}" '
+                            f'style="box-shadow:0 0 12px rgba(251,191,36,0.6);border:2px solid #fbbf24">'
+                            f'{n:02d}</span>'
+                        )
+                    else:
+                        badges_html += (
+                            f'<span class="num-badge {cls}" style="opacity:0.4">{n:02d}</span>'
+                        )
+                color = "#fbbf24" if hits >= 3 else "#60a5fa" if hits >= 2 else "#94a3b8"
+                st.markdown(
+                    f'<div style="margin:4px 0;display:flex;align-items:center;gap:8px">'
+                    f'<span style="color:#60a5fa;font-weight:700;min-width:30px">#{i}</span>'
+                    f'{badges_html}'
+                    f'<span style="color:{color};font-weight:700;margin-left:8px">{hits}個的中</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("**🎲 ランダムチーム結果**")
+            for i, c in enumerate(_sim_rnd_picks, 1):
+                hits = len(set(c) & set(last_winning))
+                hit_nums = set(c) & set(last_winning)
+                badges_html = ""
+                for n in sorted(c):
+                    cls = _num_class(n)
+                    if n in hit_nums:
+                        badges_html += (
+                            f'<span class="num-badge {cls}" '
+                            f'style="box-shadow:0 0 12px rgba(251,191,36,0.6);border:2px solid #fbbf24">'
+                            f'{n:02d}</span>'
+                        )
+                    else:
+                        badges_html += (
+                            f'<span class="num-badge {cls}" style="opacity:0.4">{n:02d}</span>'
+                        )
+                color = "#fbbf24" if hits >= 3 else "#a78bfa" if hits >= 2 else "#94a3b8"
+                st.markdown(
+                    f'<div style="margin:4px 0;display:flex;align-items:center;gap:8px">'
+                    f'<span style="color:#a78bfa;font-weight:700;min-width:30px">#{i}</span>'
+                    f'{badges_html}'
+                    f'<span style="color:{color};font-weight:700;margin-left:8px">{hits}個的中</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # 勝敗サマリー
+        rec_avg = rec_total_hits / total if total > 0 else 0
+        rnd_avg = rnd_total_hits / total if total > 0 else 0
+
+        if rec_wins > rnd_wins:
+            winner_text = "🎯 おすすめチームの勝ち！"
+            winner_color = "#60a5fa"
+        elif rnd_wins > rec_wins:
+            winner_text = "🎲 ランダムチームの勝ち！"
+            winner_color = "#a78bfa"
+        else:
+            winner_text = "🤝 引き分け！"
+            winner_color = "#94a3b8"
+
+        st.markdown(
+            f'<div class="glass-card" style="text-align:center;margin-top:16px">'
+            f'<div style="font-size:1.5rem;font-weight:800;color:{winner_color};margin-bottom:12px">'
+            f'{winner_text}</div>'
+            f'<div style="display:flex;justify-content:center;gap:32px;flex-wrap:wrap">'
+            # おすすめ
+            f'<div style="text-align:center;min-width:140px">'
+            f'<div style="color:#60a5fa;font-weight:700;margin-bottom:4px">🎯 おすすめ</div>'
+            f'<div style="font-size:1.8rem;font-weight:800;color:#60a5fa">{rec_wins}</div>'
+            f'<div style="color:#64748b;font-size:12px">勝ち</div>'
+            f'<div style="color:#94a3b8;font-size:12px;margin-top:4px">'
+            f'平均{rec_avg:.2f}個 / 最高{rec_best_ever}個 / 3個↑:{rec_3plus}回</div>'
+            f'</div>'
+            # 引き分け
+            f'<div style="text-align:center;min-width:60px">'
+            f'<div style="color:#64748b;font-weight:700;margin-bottom:4px">🤝</div>'
+            f'<div style="font-size:1.8rem;font-weight:800;color:#64748b">{draws}</div>'
+            f'<div style="color:#64748b;font-size:12px">引分</div>'
+            f'</div>'
+            # ランダム
+            f'<div style="text-align:center;min-width:140px">'
+            f'<div style="color:#a78bfa;font-weight:700;margin-bottom:4px">🎲 ランダム</div>'
+            f'<div style="font-size:1.8rem;font-weight:800;color:#a78bfa">{rnd_wins}</div>'
+            f'<div style="color:#64748b;font-size:12px">勝ち</div>'
+            f'<div style="color:#94a3b8;font-size:12px;margin-top:4px">'
+            f'平均{rnd_avg:.2f}個 / 最高{rnd_best_ever}個 / 3個↑:{rnd_3plus}回</div>'
+            f'</div>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        if _sim_trials >= 10:
+            st.caption(
+                f"※ {_sim_trials}回の仮想抽選でおすすめ{_sim_rec_count}組 vs ランダム{_sim_rnd_count}組を対戦。"
+                f"各回で最高的中数が多い方が勝ち。"
+            )
+
+
+# ══════════════════════════════════════════════
+#  タブ6: AI相談
 # ══════════════════════════════════════════════
 with tab_ai:
     st.markdown(
