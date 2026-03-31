@@ -647,4 +647,353 @@ def get_number_score(df: pd.DataFrame) -> dict[int, float]:
 
         scores[n] = base
 
+    # フィードバック重みがあれば適用
+    fb_weights = load_feedback_weights()
+    if fb_weights:
+        for n in ALL_NUMBERS:
+            adj = fb_weights.get(str(n), 0.0)
+            scores[n] *= (1.0 + adj)
+
+    return scores
+
+
+# ────────────────────────────────────────────
+#  予測フィードバック機能
+# ────────────────────────────────────────────
+import json as _json
+from pathlib import Path as _Path
+
+_FEEDBACK_DIR = _Path(__file__).parent.parent
+_PREDICTION_FILE = _FEEDBACK_DIR / ".prediction_history.json"
+_FEEDBACK_WEIGHTS_FILE = _FEEDBACK_DIR / ".feedback_weights.json"
+
+DEFAULT_FACTOR_WEIGHTS = {
+    "freq": 0.14, "recent": 0.10, "gap": 0.08,
+    "cooccurrence": 0.13, "trend": 0.15, "repeat": 0.11,
+    "streak": 0.10, "interval": 0.10, "neighbor": 0.09,
+}
+
+
+def save_predictions(round_no: int, combos: list[list[int]], scores: dict):
+    """予測結果をファイルに保存する（次回の振り返り用）"""
+    try:
+        history = _load_prediction_history()
+        # 各要因の上位番号も保存
+        entry = {
+            "round": round_no,
+            "combos": combos[:50],  # 最大50組保存
+            "top_numbers": sorted(scores, key=scores.get, reverse=True)[:15],
+            "scores": {str(n): round(s, 4) for n, s in scores.items()},
+        }
+        # 同じラウンドは上書き
+        history = [h for h in history if h.get("round") != round_no]
+        history.append(entry)
+        # 直近10回分だけ保持
+        history = sorted(history, key=lambda x: x["round"])[-10:]
+        _PREDICTION_FILE.write_text(
+            _json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _load_prediction_history() -> list:
+    try:
+        if _PREDICTION_FILE.exists():
+            return _json.loads(_PREDICTION_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def analyze_prediction_accuracy(df: pd.DataFrame) -> dict | None:
+    """
+    過去の予測と実際の結果を比較分析する。
+
+    Returns: {
+        "rounds": [
+            {
+                "round": int,
+                "predicted_top15": [int, ...],
+                "actual": [int, ...],
+                "hits_in_top15": int,
+                "best_combo_hits": int,
+                "best_combo": [int, ...],
+            }, ...
+        ],
+        "avg_hits_top15": float,
+        "avg_best_combo_hits": float,
+        "factor_accuracy": {factor_name: accuracy, ...},
+        "number_over_predicted": [(num, times_predicted, times_appeared)],
+        "number_under_predicted": [(num, times_not_predicted, times_appeared)],
+    }
+    """
+    history = _load_prediction_history()
+    if not history:
+        return None
+
+    all_draws = get_main_numbers(df)
+    round_to_draw = {}
+    for _, row in df.iterrows():
+        r = int(row["round"])
+        nums = sorted(int(row[f"n{i}"]) for i in range(1, 8))
+        round_to_draw[r] = nums
+
+    results = []
+    over_pred = Counter()   # 予測したが出なかった回数
+    under_pred = Counter()  # 予測しなかったが出た回数
+    pred_count = Counter()  # 予測された回数
+    appeared_count = Counter()  # 実際に出た回数
+
+    for entry in history:
+        pred_round = entry["round"]
+        # この予測は「pred_round 回の結果」を予測したもの
+        actual = round_to_draw.get(pred_round)
+        if actual is None:
+            continue  # まだ結果が出ていない
+
+        actual_set = set(actual)
+        top15 = entry.get("top_numbers", [])[:15]
+        combos = entry.get("combos", [])
+
+        hits_top15 = len(set(top15) & actual_set)
+
+        # 最も的中が多かった組を特定
+        best_hits = 0
+        best_combo = []
+        for combo in combos:
+            h = len(set(combo) & actual_set)
+            if h > best_hits:
+                best_hits = h
+                best_combo = combo
+
+        results.append({
+            "round": pred_round,
+            "predicted_top15": top15,
+            "actual": actual,
+            "hits_in_top15": hits_top15,
+            "best_combo_hits": best_hits,
+            "best_combo": best_combo,
+        })
+
+        # 過大/過少予測の集計
+        for n in top15:
+            pred_count[n] += 1
+            if n not in actual_set:
+                over_pred[n] += 1
+        for n in actual:
+            appeared_count[n] += 1
+            if n not in top15:
+                under_pred[n] += 1
+
+    if not results:
+        return None
+
+    avg_top15 = sum(r["hits_in_top15"] for r in results) / len(results)
+    avg_best = sum(r["best_combo_hits"] for r in results) / len(results)
+
+    # 過大予測ワースト
+    over_list = sorted(
+        [(n, over_pred[n], pred_count[n]) for n in over_pred if over_pred[n] > 0],
+        key=lambda x: x[1], reverse=True
+    )[:10]
+
+    # 過少予測ワースト
+    under_list = sorted(
+        [(n, under_pred[n], appeared_count[n]) for n in under_pred if under_pred[n] > 0],
+        key=lambda x: x[1], reverse=True
+    )[:10]
+
+    return {
+        "rounds": results,
+        "avg_hits_top15": round(avg_top15, 2),
+        "avg_best_combo_hits": round(avg_best, 2),
+        "number_over_predicted": over_list,
+        "number_under_predicted": under_list,
+    }
+
+
+def update_feedback_weights(df: pd.DataFrame):
+    """
+    予測精度分析に基づいてフィードバック重みを更新する。
+
+    過大予測された番号 → 次回スコアを微減
+    過小予測された番号 → 次回スコアを微増
+    """
+    analysis = analyze_prediction_accuracy(df)
+    if analysis is None:
+        return
+
+    weights = {}
+
+    # 過大予測: スコアを最大5%ダウン
+    for num, over_count, total_pred in analysis["number_over_predicted"]:
+        if total_pred > 0:
+            penalty = min(over_count / total_pred * 0.05, 0.05)
+            weights[str(num)] = -penalty
+
+    # 過少予測: スコアを最大5%アップ
+    for num, under_count, total_app in analysis["number_under_predicted"]:
+        if total_app > 0:
+            bonus = min(under_count / total_app * 0.05, 0.05)
+            key = str(num)
+            weights[key] = weights.get(key, 0) + bonus
+
+    try:
+        _FEEDBACK_WEIGHTS_FILE.write_text(
+            _json.dumps(weights, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def load_feedback_weights() -> dict:
+    """保存されたフィードバック重みを読み込む"""
+    try:
+        if _FEEDBACK_WEIGHTS_FILE.exists():
+            return _json.loads(_FEEDBACK_WEIGHTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def get_feedback_summary(df: pd.DataFrame) -> str:
+    """予測振り返りのサマリーテキストを生成する"""
+    analysis = analyze_prediction_accuracy(df)
+    if analysis is None:
+        return "まだ予測履歴がありません。次回の抽選後に振り返りが表示されます。"
+
+    lines = []
+    lines.append(f"**過去 {len(analysis['rounds'])} 回分の予測振り返り**\n")
+    lines.append(f"- 上位15番号の平均的中: **{analysis['avg_hits_top15']:.1f} / 7個**")
+    lines.append(f"- おすすめ組の最高平均的中: **{analysis['avg_best_combo_hits']:.1f} / 7個**\n")
+
+    for r in analysis["rounds"]:
+        actual_str = ", ".join(f"{n:02d}" for n in r["actual"])
+        top_hits = r["hits_in_top15"]
+        best_hits = r["best_combo_hits"]
+        best_str = ", ".join(f"{n:02d}" for n in r["best_combo"]) if r["best_combo"] else "-"
+        lines.append(
+            f"第{r['round']}回: 実際 [{actual_str}]　"
+            f"上位15中 **{top_hits}個的中**　最高組 **{best_hits}個的中** [{best_str}]"
+        )
+
+    if analysis["number_over_predicted"]:
+        lines.append("\n**過大予測（予測したが出にくかった番号）:**")
+        for num, cnt, total in analysis["number_over_predicted"][:5]:
+            lines.append(f"- {num:02d}: {cnt}/{total}回ハズレ")
+
+    if analysis["number_under_predicted"]:
+        lines.append("\n**過小予測（予測しなかったが出た番号）:**")
+        for num, cnt, total in analysis["number_under_predicted"][:5]:
+            lines.append(f"- {num:02d}: {cnt}/{total}回見逃し")
+
+    fb = load_feedback_weights()
+    if fb:
+        adj_up = [(int(n), v) for n, v in fb.items() if v > 0]
+        adj_down = [(int(n), v) for n, v in fb.items() if v < 0]
+        if adj_up:
+            adj_up.sort(key=lambda x: x[1], reverse=True)
+            nums_str = ", ".join(f"{n:02d}(+{v*100:.1f}%)" for n, v in adj_up[:5])
+            lines.append(f"\n**フィードバック補正（上方）:** {nums_str}")
+        if adj_down:
+            adj_down.sort(key=lambda x: x[1])
+            nums_str = ", ".join(f"{n:02d}({v*100:.1f}%)" for n, v in adj_down[:5])
+            lines.append(f"**フィードバック補正（下方）:** {nums_str}")
+
+    return "\n".join(lines)
+
+
+def run_backtest(df: pd.DataFrame, last_n: int = 5) -> list[dict]:
+    """
+    過去 last_n 回分のバックテストを実行する。
+    各回について「その回の前のデータだけで予測→実際の結果と比較」を行う。
+    """
+    from .prediction import generate_combinations
+
+    all_rounds = df["round"].tolist()
+    if len(all_rounds) < 20:
+        return []
+
+    results = []
+    test_start = max(0, len(df) - last_n)
+
+    for idx in range(test_start, len(df)):
+        train_df = df.iloc[:idx].copy()
+        if len(train_df) < 10:
+            continue
+
+        actual_row = df.iloc[idx]
+        actual = sorted(int(actual_row[f"n{i}"]) for i in range(1, 8))
+        actual_set = set(actual)
+        target_round = int(actual_row["round"])
+
+        scores = _get_raw_score(train_df)
+        top15 = sorted(scores, key=scores.get, reverse=True)[:15]
+        hits_top15 = len(set(top15) & actual_set)
+
+        try:
+            combos = generate_combinations(train_df, n=20)
+        except Exception:
+            combos = []
+
+        best_hits = 0
+        best_combo = []
+        for combo in combos:
+            h = len(set(combo) & actual_set)
+            if h > best_hits:
+                best_hits = h
+                best_combo = combo
+
+        results.append({
+            "round": target_round,
+            "actual": actual,
+            "top15": top15,
+            "hits_top15": hits_top15,
+            "best_combo": best_combo,
+            "best_combo_hits": best_hits,
+        })
+
+    return results
+
+
+def _get_raw_score(df: pd.DataFrame) -> dict[int, float]:
+    """フィードバック重みなしの素のスコア（バックテスト用）"""
+    total = len(df)
+    freq = get_frequency(df)
+    recent = get_recent_activity(df, last_n=max(10, total // 10))
+    last_app = get_last_appearance(df)
+    co_score = get_cooccurrence_score(df)
+    trend = get_trend_score(df)
+    repeat = get_repeat_score(df)
+    streak = get_streak_score(df)
+    streaks_raw = get_streak_stats(df)
+    interval = get_interval_score(df)
+    neighbor = get_neighbor_score(df)
+
+    max_freq = max(freq.values()) or 1
+    max_recent = max(recent.values()) or 1
+    max_gap = max(last_app.values()) or 1
+
+    scores = {}
+    for n in ALL_NUMBERS:
+        base = (
+            (freq[n] / max_freq) * 0.14
+            + (recent[n] / max_recent) * 0.10
+            + (last_app[n] / max_gap) * 0.08
+            + co_score[n] * 0.13
+            + trend[n] * 0.15
+            + repeat[n] * 0.11
+            + streak[n] * 0.10
+            + interval[n] * 0.10
+            + neighbor[n] * 0.09
+        )
+        cs = streaks_raw[n]["current_streak"]
+        if cs >= 6:
+            base *= 0.50
+        elif cs >= 5:
+            base *= 0.60
+        elif cs >= 4:
+            base *= 0.75
+        scores[n] = base
     return scores

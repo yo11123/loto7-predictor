@@ -75,6 +75,39 @@ button[data-baseweb="tab"][aria-selected="true"] {
     border-bottom: 2px solid #60a5fa !important;
 }
 
+/* ── タブパネル内のコンテンツを常に不透明に ── */
+div[data-baseweb="tab-panel"] {
+    opacity: 1 !important;
+}
+div[data-baseweb="tab-panel"] * {
+    opacity: inherit;
+}
+/* タブ内の全テキストを明るく */
+div[data-baseweb="tab-panel"] p,
+div[data-baseweb="tab-panel"] span,
+div[data-baseweb="tab-panel"] div,
+div[data-baseweb="tab-panel"] label,
+div[data-baseweb="tab-panel"] h1,
+div[data-baseweb="tab-panel"] h2,
+div[data-baseweb="tab-panel"] h3,
+div[data-baseweb="tab-panel"] td,
+div[data-baseweb="tab-panel"] th,
+div[data-baseweb="tab-panel"] li {
+    color: #e2e8f0 !important;
+}
+/* Streamlit markdown/caption の色を強制 */
+div[data-baseweb="tab-panel"] .stMarkdown,
+div[data-baseweb="tab-panel"] .stMarkdown p {
+    color: #e2e8f0 !important;
+    opacity: 1 !important;
+}
+div[data-baseweb="tab-panel"] small,
+div[data-baseweb="tab-panel"] .stCaption,
+div[data-baseweb="tab-panel"] .stCaption p {
+    color: #94a3b8 !important;
+    opacity: 1 !important;
+}
+
 /* ── メトリックカード ── */
 div[data-testid="stMetric"] {
     background: linear-gradient(135deg, #131f36 0%, #172340 100%);
@@ -475,23 +508,31 @@ def _save_checks():
     except Exception:
         pass
 
-# 起動時にチェック状態を復元
+# ── 起動時にチェック状態を復元 + 抽選更新時リセット ──
+_current_latest = int(df_raw["round"].max())
+
 if "_checks_loaded" not in st.session_state:
+    # 初回起動: ファイルからチェック状態を復元
     saved = _load_checks()
     saved_round = saved.pop("_round", 0)
-    current_round = int(df_raw["round"].max())
-    if saved_round == current_round:
+
+    if saved_round == _current_latest:
         # 同じラウンド → チェックを復元
         for k, v in saved.items():
             if k.startswith("chk_"):
                 st.session_state[k] = v
-    # 違うラウンド → リセット（復元しない）
+    else:
+        # 違うラウンド → リセット（復元しない）、キャッシュもクリア
+        for k in list(st.session_state.keys()):
+            if k.startswith("chk_") or k in ("combos", "_combo_cache_key", "custom_nums"):
+                del st.session_state[k]
+        _save_checks()
+
+    st.session_state["_last_known_round"] = _current_latest
     st.session_state["_checks_loaded"] = True
 
-# ── 抽選結果が更新されたらチェックを自動リセット ──
-_current_latest = int(df_raw["round"].max())
-if st.session_state.get("_last_known_round", 0) != _current_latest:
-    # 新しい抽選回が追加された
+elif st.session_state.get("_last_known_round", 0) != _current_latest:
+    # セッション中に新しい抽選回が追加された場合
     keys_to_clear = [
         k for k in list(st.session_state.keys())
         if k.startswith("chk_") or k in ("combos", "_combo_cache_key", "custom_nums")
@@ -499,7 +540,6 @@ if st.session_state.get("_last_known_round", 0) != _current_latest:
     for k in keys_to_clear:
         del st.session_state[k]
     st.session_state["_last_known_round"] = _current_latest
-    # リセット後のチェック状態もファイルに反映
     _save_checks()
 
 # ── 前回の当選番号を表示 ──
@@ -629,6 +669,14 @@ with tab_pred:
 
     combos = st.session_state["combos"]
 
+    # 予測結果を常に保存（振り返り用 — キャッシュ外で実行）
+    from modules.analysis import save_predictions, get_number_score as _gns, update_feedback_weights
+    if combos and st.session_state.get("_prediction_saved_round") != next_round:
+        _scores_for_save = _gns(df)
+        save_predictions(next_round, combos, _scores_for_save)
+        update_feedback_weights(df)
+        st.session_state["_prediction_saved_round"] = next_round
+
     # カスタム番号変更を管理する session_state
     if "custom_nums" not in st.session_state:
         st.session_state["custom_nums"] = {}
@@ -687,60 +735,68 @@ with tab_pred:
                 st.rerun()
 
         # ── 色付きテーブル（各行にチェック + 番号クリックで入れ替え） ──
-        purchased_nos = []
-        for _, row in combo_df.iterrows():
-            no = int(row["No."])
-            nums = [int(row[f"第{j}"]) for j in range(1, 8)]
-            is_custom = no in st.session_state["custom_nums"]
-            badges = _num_badges_with_consec(nums)
-            custom_mark = '<span style="color:#fbbf24;font-size:11px;margin-left:4px">✎変更済</span>' if is_custom else ""
-            stats_text = (
-                f'<span style="color:#94a3b8;font-size:13px;margin-left:8px">'
-                f'確率 {row["確率(%)"]:.3f}%　'
-                f'優位 {row["優位倍率"]:.2f}x　'
-                f'スコア {row["スコア"]:.2f}</span>'
-            )
-
-            # チェック状態を先に取得（既存のsession_stateから）
-            _already_checked = st.session_state.get(f"chk_{no}", False)
-            _row_opacity = "0.35" if _already_checked else "1.0"
-            _row_extra = ""
-            if _already_checked:
-                _row_extra = '<span style="color:#22c55e;font-size:11px;margin-left:6px;font-weight:600">✓ 購入済</span>'
-
-            col_chk, col_nums, col_edit = st.columns([0.4, 8.6, 1])
-            with col_chk:
-                chk = st.checkbox("", key=f"chk_{no}", label_visibility="collapsed")
-            with col_nums:
-                st.markdown(
-                    f'<div style="display:flex;align-items:center;flex-wrap:wrap;gap:2px;margin-top:2px;opacity:{_row_opacity}">'
-                    f'<span style="color:#e2e8f0;font-weight:700;min-width:52px">No.{no}</span>'
-                    f'{badges}{custom_mark}{_row_extra}{stats_text}</div>',
-                    unsafe_allow_html=True,
+        # st.fragment で囲んでチェック操作時の再描画を高速化
+        @st.fragment
+        def _render_combo_list(_combo_df, _scores_dict):
+            _purchased = []
+            for _, row in _combo_df.iterrows():
+                no = int(row["No."])
+                nums = [int(row[f"第{j}"]) for j in range(1, 8)]
+                is_custom = no in st.session_state.get("custom_nums", {})
+                badges = _num_badges_with_consec(nums)
+                custom_mark = '<span style="color:#fbbf24;font-size:11px;margin-left:4px">✎変更済</span>' if is_custom else ""
+                stats_text = (
+                    f'<span style="color:#94a3b8;font-size:13px;margin-left:8px">'
+                    f'確率 {row["確率(%)"]:.3f}%　'
+                    f'優位 {row["優位倍率"]:.2f}x　'
+                    f'スコア {row["スコア"]:.2f}</span>'
                 )
-            with col_edit:
-                with st.popover("✏️", use_container_width=True):
-                    st.markdown(f"**No.{no} の番号を入れ替え**")
-                    swap_from = st.selectbox(
-                        "変更する番号", nums,
-                        key=f"sf_{no}",
-                        format_func=lambda x: f"{x:02d}",
-                    )
-                    available = sorted(n for n in ALL_NUMBERS if n not in nums)
-                    swap_to = st.selectbox(
-                        "新しい番号", available,
-                        key=f"st_{no}",
-                        format_func=lambda x: f"{x:02d}",
-                    )
-                    if st.button("入れ替え", key=f"sb_{no}", type="primary", use_container_width=True):
-                        new_nums = sorted(swap_to if n == swap_from else n for n in nums)
-                        st.session_state["custom_nums"][no] = new_nums
-                        st.rerun()
-            if chk:
-                purchased_nos.append((no, nums))
 
-        # チェック状態をファイルに保存（リロードしても消えないように）
-        _save_checks()
+                _already_checked = st.session_state.get(f"chk_{no}", False)
+                _row_opacity = "0.35" if _already_checked else "1.0"
+                _row_extra = ""
+                if _already_checked:
+                    _row_extra = '<span style="color:#22c55e;font-size:11px;margin-left:6px;font-weight:600">✓ 購入済</span>'
+
+                col_chk, col_nums, col_edit = st.columns([0.4, 8.6, 1])
+                with col_chk:
+                    chk = st.checkbox("", key=f"chk_{no}", label_visibility="collapsed")
+                with col_nums:
+                    st.markdown(
+                        f'<div style="display:flex;align-items:center;flex-wrap:wrap;gap:2px;margin-top:2px;opacity:{_row_opacity}">'
+                        f'<span style="color:#e2e8f0;font-weight:700;min-width:52px">No.{no}</span>'
+                        f'{badges}{custom_mark}{_row_extra}{stats_text}</div>',
+                        unsafe_allow_html=True,
+                    )
+                with col_edit:
+                    with st.popover("✏️", use_container_width=True):
+                        st.markdown(f"**No.{no} の番号を入れ替え**")
+                        swap_from = st.selectbox(
+                            "変更する番号", nums,
+                            key=f"sf_{no}",
+                            format_func=lambda x: f"{x:02d}",
+                        )
+                        available = sorted(n for n in ALL_NUMBERS if n not in nums)
+                        swap_to = st.selectbox(
+                            "新しい番号", available,
+                            key=f"st_{no}",
+                            format_func=lambda x: f"{x:02d}",
+                        )
+                        if st.button("入れ替え", key=f"sb_{no}", type="primary", use_container_width=True):
+                            new_nums = sorted(swap_to if n == swap_from else n for n in nums)
+                            if "custom_nums" not in st.session_state:
+                                st.session_state["custom_nums"] = {}
+                            st.session_state["custom_nums"][no] = new_nums
+                            st.rerun()
+                if chk:
+                    _purchased.append((no, nums))
+
+            # チェック状態をファイルに保存
+            _save_checks()
+            st.session_state["_purchased_nos"] = _purchased
+
+        _render_combo_list(combo_df, scores)
+        purchased_nos = st.session_state.get("_purchased_nos", [])
 
         # ── 選定理由 ──
         with st.expander("🔍 各組み合わせの選定理由", expanded=False):
@@ -801,6 +857,80 @@ with tab_pred:
                 )
     else:
         st.warning("組み合わせを生成できませんでした。分析対象の回数を増やしてみてください。")
+
+    # ── 予測精度バックテスト ──
+    st.markdown("")
+    from modules.analysis import run_backtest, get_feedback_summary, analyze_prediction_accuracy
+
+    with st.expander("📊 予測精度の検証（過去データでバックテスト）", expanded=False):
+        st.caption("過去の抽選を「予測→結果比較」でシミュレーションし、分析の精度を検証します。")
+
+        _bt_n = st.slider("バックテストする回数", 3, 20, 5, key="bt_n")
+
+        if st.button("バックテスト実行", key="btn_bt"):
+            with st.spinner(f"直近 {_bt_n} 回分のバックテスト中..."):
+                bt_results = run_backtest(df, last_n=_bt_n)
+
+            if bt_results:
+                avg_top15 = sum(r["hits_top15"] for r in bt_results) / len(bt_results)
+                avg_best = sum(r["best_combo_hits"] for r in bt_results) / len(bt_results)
+
+                st.markdown(
+                    f'<div class="glass-card">'
+                    f'<div style="display:flex;gap:40px;justify-content:center">'
+                    f'<div style="text-align:center">'
+                    f'<div style="color:#64748b;font-size:12px">上位15番号の平均的中</div>'
+                    f'<div style="font-size:1.8rem;font-weight:700;color:#60a5fa">{avg_top15:.1f}<span style="font-size:0.9rem;color:#64748b"> / 7</span></div>'
+                    f'</div>'
+                    f'<div style="text-align:center">'
+                    f'<div style="color:#64748b;font-size:12px">最高組の平均的中</div>'
+                    f'<div style="font-size:1.8rem;font-weight:700;color:#a78bfa">{avg_best:.1f}<span style="font-size:0.9rem;color:#64748b"> / 7</span></div>'
+                    f'</div>'
+                    f'</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+                for r in bt_results:
+                    actual_badges = _num_badges_with_consec(r["actual"])
+                    top15_set = set(r["top15"])
+                    actual_set = set(r["actual"])
+                    hit_nums = top15_set & actual_set
+                    miss_nums = actual_set - top15_set
+
+                    hit_str = ", ".join(f"**{n:02d}**" for n in sorted(hit_nums)) if hit_nums else "—"
+                    miss_str = ", ".join(f"{n:02d}" for n in sorted(miss_nums)) if miss_nums else "—"
+
+                    best_str = ""
+                    if r["best_combo"]:
+                        best_badges = _num_badges_with_consec(r["best_combo"])
+                        best_str = f"最高組（{r['best_combo_hits']}個的中）: {best_badges}"
+
+                    st.markdown(
+                        f'<div style="border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;margin:8px 0">'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+                        f'<span style="font-weight:700;color:#e2e8f0">第{r["round"]}回</span>'
+                        f'<span style="color:#60a5fa;font-weight:600">上位15中 {r["hits_top15"]}個的中</span>'
+                        f'</div>'
+                        f'<div style="margin-bottom:6px">実際: {actual_badges}</div>'
+                        f'<div style="font-size:13px;color:#94a3b8">的中: {hit_str}　見逃し: {miss_str}</div>'
+                        f'{"<div style=margin-top:6px;font-size:13px>" + best_str + "</div>" if best_str else ""}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                st.caption(
+                    "バックテスト結果はフィードバックとしてスコアに自動反映されます。"
+                    "過大予測された番号はスコア微減、過小予測された番号はスコア微増されます。"
+                )
+            else:
+                st.info("バックテストに十分なデータがありません。")
+
+    # ── 予測履歴の振り返り（保存済み予測 vs 実結果）──
+    _fb_analysis = analyze_prediction_accuracy(df)
+    if _fb_analysis is not None:
+        with st.expander("📈 保存済み予測の振り返り", expanded=False):
+            _fb_text = get_feedback_summary(df)
+            st.markdown(_fb_text)
 
     st.markdown("")
 
