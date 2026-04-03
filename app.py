@@ -860,7 +860,52 @@ with tab_pred:
 
     # ── 予測精度バックテスト ──
     st.markdown("")
-    from modules.analysis import run_backtest, get_feedback_summary, analyze_prediction_accuracy
+    from modules.analysis import (
+        run_backtest, get_feedback_summary, analyze_prediction_accuracy,
+        optimize_weights, load_optimized_weights, FACTOR_NAMES, DEFAULT_WEIGHTS,
+    )
+
+    # ── 重み最適化 ──
+    with st.expander("🧠 重みの自動最適化（12要因の配分を学習）", expanded=False):
+        st.caption(
+            "過去データでバックテストを繰り返し、12要因の最適な重み配分を自動で発見します。"
+            "初回は数十秒かかりますが、結果は保存されて次回以降の予測に反映されます。"
+        )
+
+        _opt_rounds = st.slider("学習に使う回数", 10, 50, 30, key="opt_rounds")
+
+        if st.button("最適化を実行", key="btn_opt", type="primary"):
+            with st.spinner(f"直近 {_opt_rounds} 回で12要因の重みを最適化中...（数十秒かかります）"):
+                opt_w = optimize_weights(df, test_rounds=_opt_rounds)
+
+            _factor_labels = {
+                "freq": "頻度", "recent": "活性度", "gap": "未出現",
+                "cooccurrence": "共起", "trend": "トレンド", "repeat": "連続出現",
+                "streak": "ストリーク", "interval": "周期性", "neighbor": "隣接効果",
+                "conditional": "条件付確率", "pattern_match": "パターン認識", "ensemble": "合議制",
+            }
+            opt_html = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0">'
+            for name, w in zip(FACTOR_NAMES, opt_w):
+                label = _factor_labels.get(name, name)
+                pct = w * 100
+                bar_w = int(pct * 4)
+                opt_html += (
+                    f'<div style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:6px 10px;min-width:120px">'
+                    f'<div style="font-size:11px;color:#64748b">{label}</div>'
+                    f'<div style="display:flex;align-items:center;gap:6px">'
+                    f'<div style="flex:1;background:#0f172a;border-radius:3px;height:6px;overflow:hidden">'
+                    f'<div style="width:{bar_w}%;height:100%;background:#60a5fa;border-radius:3px"></div></div>'
+                    f'<span style="font-size:13px;font-weight:700;color:#e2e8f0;min-width:40px">{pct:.1f}%</span>'
+                    f'</div></div>'
+                )
+            opt_html += '</div>'
+            st.markdown(opt_html, unsafe_allow_html=True)
+            st.success("最適化完了。次回の予測に自動反映されます。")
+
+        # 現在の重みを表示
+        _cur_w = load_optimized_weights()
+        _is_default = _cur_w == DEFAULT_WEIGHTS
+        st.markdown(f"現在の重み: {'**デフォルト**（未最適化）' if _is_default else '**最適化済み**'}")
 
     with st.expander("📊 予測精度の検証（過去データでバックテスト）", expanded=False):
         st.caption("過去の抽選を「予測→結果比較」でシミュレーションし、分析の精度を検証します。")

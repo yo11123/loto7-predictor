@@ -2,6 +2,8 @@
 
 import pandas as pd
 import numpy as np
+import json as _json
+from pathlib import Path as _Path
 from collections import Counter
 from itertools import combinations
 from .data import get_main_numbers
@@ -579,64 +581,299 @@ def get_neighbor_numbers(df: pd.DataFrame) -> list[tuple[int, float]]:
 
 
 # ────────────────────────────────────────────
-#  強化版 総合スコア
+#  条件付き確率モデル（ベイズ的遷移確率）
 # ────────────────────────────────────────────
-def get_number_score(df: pd.DataFrame) -> dict[int, float]:
+def get_conditional_score(df: pd.DataFrame) -> dict[int, float]:
     """
-    各番号の総合スコアを計算して返す（強化版）。
+    前回の当選番号7つそれぞれに対して「Aが出た次にBが出る確率」を
+    ベイズ的に計算し、全7番号からの遷移確率を合成する。
+    """
+    all_draws = get_main_numbers(df)
+    if len(all_draws) < 10:
+        return {n: 0.5 for n in ALL_NUMBERS}
 
-    スコア要因と重み（9要因）:
-    - 全体頻度               14%
-    - 直近の活性度            10%
-    - 長期未出現ボーナス        8%
-    - 共起力                 13%
-    - トレンド（上昇傾向）     15%
-    - 連続出現（前回→次回）    11%
-    - ストリーク（連続の勢い） 10%
-    - 出現間隔の周期性         10%  ← NEW
-    - 隣接数字効果             9%  ← NEW
+    # 遷移カウント: transition[a][b] = aが出た次の回にbが出た回数
+    transition = {a: Counter() for a in ALL_NUMBERS}
+    appear_count = Counter()
+
+    for i in range(len(all_draws) - 1):
+        curr = set(int(x) for x in all_draws[i])
+        nxt = set(int(x) for x in all_draws[i + 1])
+        for a in curr:
+            appear_count[a] += 1
+            for b in nxt:
+                transition[a][b] += 1
+
+    # 最新回の番号から各番号への遷移確率を合成
+    last_draw = [int(x) for x in all_draws[-1]]
+    raw = {n: 0.0 for n in ALL_NUMBERS}
+
+    for a in last_draw:
+        if appear_count[a] == 0:
+            continue
+        for n in ALL_NUMBERS:
+            raw[n] += transition[a][n] / appear_count[a]
+
+    # 正規化 0-1
+    max_r = max(raw.values()) or 1
+    return {n: raw[n] / max_r for n in ALL_NUMBERS}
+
+
+# ────────────────────────────────────────────
+#  時系列パターン認識（類似パターン検索）
+# ────────────────────────────────────────────
+def get_pattern_match_score(df: pd.DataFrame, window: int = 5) -> dict[int, float]:
     """
+    直近 window 回の出目パターンに最も類似した過去パターンを探し、
+    その次に出た番号にスコアを付ける。
+    """
+    all_draws = get_main_numbers(df)
+    if len(all_draws) < window + 10:
+        return {n: 0.5 for n in ALL_NUMBERS}
+
+    # 直近パターン（各回の出目セット）
+    recent_pattern = [set(int(x) for x in d) for d in all_draws[-window:]]
+
+    # 過去の全ウィンドウとの類似度を計算
+    scores_accum = {n: 0.0 for n in ALL_NUMBERS}
+    total_weight = 0.0
+
+    for start in range(len(all_draws) - window - 1):
+        past_pattern = [set(int(x) for x in d) for d in all_draws[start:start + window]]
+
+        # 類似度: 各回のJaccard類似度の平均
+        sim_sum = 0.0
+        for rp, pp in zip(recent_pattern, past_pattern):
+            inter = len(rp & pp)
+            union = len(rp | pp)
+            sim_sum += inter / union if union > 0 else 0
+        similarity = sim_sum / window
+
+        if similarity < 0.15:  # 類似度が低すぎるものは無視
+            continue
+
+        # その次の回の番号にスコア加算（類似度で重み付け）
+        next_draw = set(int(x) for x in all_draws[start + window])
+        weight = similarity ** 2  # 二乗で強い類似を重視
+        for n in next_draw:
+            scores_accum[n] += weight
+        total_weight += weight
+
+    if total_weight == 0:
+        return {n: 0.5 for n in ALL_NUMBERS}
+
+    max_s = max(scores_accum.values()) or 1
+    return {n: scores_accum[n] / max_s for n in ALL_NUMBERS}
+
+
+# ────────────────────────────────────────────
+#  アンサンブルスコア（複数期間の合議制）
+# ────────────────────────────────────────────
+def get_ensemble_score(df: pd.DataFrame) -> dict[int, float]:
+    """
+    異なる分析期間（直近50回 / 直近150回 / 全体）で別々にスコアを出し、
+    複数期間で上位に入った番号を優先する合議制スコア。
+    """
+    total = len(df)
+    periods = []
+    if total >= 50:
+        periods.append(df.tail(50))
+    if total >= 150:
+        periods.append(df.tail(150))
+    periods.append(df)  # 全体
+
+    if len(periods) < 2:
+        return {n: 0.5 for n in ALL_NUMBERS}
+
+    # 各期間でのランキングを取得
+    rankings = []
+    for period_df in periods:
+        freq = get_frequency(period_df)
+        recent = get_recent_activity(period_df, last_n=max(5, len(period_df) // 10))
+        max_f = max(freq.values()) or 1
+        max_r = max(recent.values()) or 1
+        period_score = {}
+        for n in ALL_NUMBERS:
+            period_score[n] = (freq[n] / max_f) * 0.6 + (recent[n] / max_r) * 0.4
+        ranked = sorted(ALL_NUMBERS, key=lambda x: period_score[x], reverse=True)
+        rankings.append({n: rank for rank, n in enumerate(ranked, 1)})
+
+    # 合議: 全期間での平均ランクが低いほど高スコア
+    avg_rank = {}
+    for n in ALL_NUMBERS:
+        avg_rank[n] = sum(r[n] for r in rankings) / len(rankings)
+
+    # 反転して正規化（ランク1=最高スコア）
+    max_rank = max(avg_rank.values())
+    min_rank = min(avg_rank.values())
+    rng = max_rank - min_rank if max_rank != min_rank else 1
+    return {n: (max_rank - avg_rank[n]) / rng for n in ALL_NUMBERS}
+
+
+# ────────────────────────────────────────────
+#  重みの自動最適化
+# ────────────────────────────────────────────
+_OPTIMIZED_WEIGHTS_FILE = _Path(__file__).parent.parent / ".optimized_weights.json"
+
+DEFAULT_WEIGHTS = [0.12, 0.08, 0.06, 0.10, 0.12, 0.09, 0.08, 0.08, 0.07, 0.06, 0.07, 0.07]
+FACTOR_NAMES = [
+    "freq", "recent", "gap", "cooccurrence", "trend", "repeat",
+    "streak", "interval", "neighbor", "conditional", "pattern_match", "ensemble",
+]
+
+
+def optimize_weights(df: pd.DataFrame, test_rounds: int = 30) -> list[float]:
+    """
+    バックテストで重みを自動最適化する。
+    各要因の重みを微調整して、上位15番号の的中率が最大になる組み合わせを探す。
+    """
+    total = len(df)
+    if total < test_rounds + 20:
+        return DEFAULT_WEIGHTS
+
+    best_weights = DEFAULT_WEIGHTS[:]
+    best_score = -1
+
+    # 現在の重みでベースラインスコアを計算
+    base_hits = _evaluate_weights(df, best_weights, test_rounds)
+    best_score = base_hits
+
+    # 各要因を±3%ずつ振って改善を探索（座標降下法）
+    for iteration in range(3):  # 3ラウンド
+        improved = False
+        for i in range(len(best_weights)):
+            for delta in [0.03, -0.03, 0.06, -0.06]:
+                trial = best_weights[:]
+                trial[i] = max(0.01, trial[i] + delta)
+                # 正規化
+                s = sum(trial)
+                trial = [w / s for w in trial]
+
+                hits = _evaluate_weights(df, trial, test_rounds)
+                if hits > best_score:
+                    best_score = hits
+                    best_weights = trial
+                    improved = True
+
+        if not improved:
+            break
+
+    # 保存
+    try:
+        _OPTIMIZED_WEIGHTS_FILE.write_text(
+            _json.dumps({
+                "weights": best_weights,
+                "score": best_score,
+                "factors": FACTOR_NAMES,
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+    return best_weights
+
+
+def _evaluate_weights(df: pd.DataFrame, weights: list[float], test_rounds: int) -> float:
+    """指定した重みでバックテストし、上位15番号の平均的中数を返す"""
+    total_hits = 0
+    test_start = max(0, len(df) - test_rounds)
+
+    for idx in range(test_start, len(df)):
+        train_df = df.iloc[:idx]
+        if len(train_df) < 10:
+            continue
+
+        actual_row = df.iloc[idx]
+        actual = set(int(actual_row[f"n{i}"]) for i in range(1, 8))
+
+        scores = _calc_score_with_weights(train_df, weights)
+        top15 = set(sorted(scores, key=scores.get, reverse=True)[:15])
+        total_hits += len(top15 & actual)
+
+    count = len(df) - test_start
+    return total_hits / count if count > 0 else 0
+
+
+def _calc_score_with_weights(df: pd.DataFrame, weights: list[float]) -> dict[int, float]:
+    """指定した重みで12要因スコアを計算"""
+    total = len(df)
+    factors = _get_all_factors(df)
+
+    scores = {}
+    for n in ALL_NUMBERS:
+        s = sum(factors[i].get(n, 0) * weights[i] for i in range(len(weights)))
+        scores[n] = s
+    return scores
+
+
+def _get_all_factors(df: pd.DataFrame) -> list[dict[int, float]]:
+    """全12要因の正規化スコアをリストで返す"""
     total = len(df)
     freq = get_frequency(df)
     recent = get_recent_activity(df, last_n=max(10, total // 10))
     last_app = get_last_appearance(df)
-    co_score = get_cooccurrence_score(df)
-    trend = get_trend_score(df)
-    repeat = get_repeat_score(df)
-    streak = get_streak_score(df)
-    streaks_raw = get_streak_stats(df)
-    interval = get_interval_score(df)
-    neighbor = get_neighbor_score(df)
 
     max_freq = max(freq.values()) or 1
     max_recent = max(recent.values()) or 1
     max_gap = max(last_app.values()) or 1
 
+    f_freq = {n: freq[n] / max_freq for n in ALL_NUMBERS}
+    f_recent = {n: recent[n] / max_recent for n in ALL_NUMBERS}
+    f_gap = {n: last_app[n] / max_gap for n in ALL_NUMBERS}
+    f_co = get_cooccurrence_score(df)
+    f_trend = get_trend_score(df)
+    f_repeat = get_repeat_score(df)
+    f_streak = get_streak_score(df)
+    f_interval = get_interval_score(df)
+    f_neighbor = get_neighbor_score(df)
+    f_conditional = get_conditional_score(df)
+    f_pattern = get_pattern_match_score(df)
+    f_ensemble = get_ensemble_score(df)
+
+    return [
+        f_freq, f_recent, f_gap, f_co, f_trend, f_repeat,
+        f_streak, f_interval, f_neighbor, f_conditional, f_pattern, f_ensemble,
+    ]
+
+
+def load_optimized_weights() -> list[float]:
+    """保存された最適化重みを読み込む"""
+    try:
+        if _OPTIMIZED_WEIGHTS_FILE.exists():
+            data = _json.loads(_OPTIMIZED_WEIGHTS_FILE.read_text(encoding="utf-8"))
+            return data.get("weights", DEFAULT_WEIGHTS)
+    except Exception:
+        pass
+    return DEFAULT_WEIGHTS
+
+
+# ────────────────────────────────────────────
+#  強化版 総合スコア（12要因 + 自動最適化重み）
+# ────────────────────────────────────────────
+def get_number_score(df: pd.DataFrame) -> dict[int, float]:
+    """
+    各番号の総合スコアを計算して返す（12要因版）。
+
+    要因:
+    1. 全体頻度           2. 直近の活性度
+    3. 長期未出現          4. 共起力
+    5. トレンド           6. 連続出現
+    7. ストリーク          8. 出現間隔の周期性
+    9. 隣接数字効果        10. 条件付き確率（ベイズ）
+    11. パターン認識        12. アンサンブル（合議制）
+
+    重みは自動最適化されたものを使用（なければデフォルト）。
+    """
+    weights = load_optimized_weights()
+    factors = _get_all_factors(df)
+    streaks_raw = get_streak_stats(df)
+
     scores = {}
     for n in ALL_NUMBERS:
-        freq_s = freq[n] / max_freq
-        recent_s = recent[n] / max_recent
-        gap_s = last_app[n] / max_gap
-        co_s = co_score[n]
-        trend_s = trend[n]
-        repeat_s = repeat[n]
-        streak_s = streak[n]
-        interval_s = interval[n]
-        neighbor_s = neighbor[n]
+        base = sum(factors[i].get(n, 0) * weights[i] for i in range(len(weights)))
 
-        base = (
-            freq_s * 0.14
-            + recent_s * 0.10
-            + gap_s * 0.08
-            + co_s * 0.13
-            + trend_s * 0.15
-            + repeat_s * 0.11
-            + streak_s * 0.10
-            + interval_s * 0.10
-            + neighbor_s * 0.09
-        )
-
-        # 出すぎペナルティ: 4連続以上は総合スコアを割引
+        # 出すぎペナルティ
         cs = streaks_raw[n]["current_streak"]
         if cs >= 6:
             base *= 0.50
@@ -660,9 +897,6 @@ def get_number_score(df: pd.DataFrame) -> dict[int, float]:
 # ────────────────────────────────────────────
 #  予測フィードバック機能
 # ────────────────────────────────────────────
-import json as _json
-from pathlib import Path as _Path
-
 _FEEDBACK_DIR = _Path(__file__).parent.parent
 _PREDICTION_FILE = _FEEDBACK_DIR / ".prediction_history.json"
 _FEEDBACK_WEIGHTS_FILE = _FEEDBACK_DIR / ".feedback_weights.json"
@@ -1024,36 +1258,14 @@ def _update_feedback_from_backtest(predicted: dict, hit: dict, missed: dict, n_r
 
 
 def _get_raw_score(df: pd.DataFrame) -> dict[int, float]:
-    """フィードバック重みなしの素のスコア（バックテスト用）"""
-    total = len(df)
-    freq = get_frequency(df)
-    recent = get_recent_activity(df, last_n=max(10, total // 10))
-    last_app = get_last_appearance(df)
-    co_score = get_cooccurrence_score(df)
-    trend = get_trend_score(df)
-    repeat = get_repeat_score(df)
-    streak = get_streak_score(df)
+    """フィードバック重みなしの素のスコア（バックテスト用、12要因版）"""
+    weights = load_optimized_weights()
+    factors = _get_all_factors(df)
     streaks_raw = get_streak_stats(df)
-    interval = get_interval_score(df)
-    neighbor = get_neighbor_score(df)
-
-    max_freq = max(freq.values()) or 1
-    max_recent = max(recent.values()) or 1
-    max_gap = max(last_app.values()) or 1
 
     scores = {}
     for n in ALL_NUMBERS:
-        base = (
-            (freq[n] / max_freq) * 0.14
-            + (recent[n] / max_recent) * 0.10
-            + (last_app[n] / max_gap) * 0.08
-            + co_score[n] * 0.13
-            + trend[n] * 0.15
-            + repeat[n] * 0.11
-            + streak[n] * 0.10
-            + interval[n] * 0.10
-            + neighbor[n] * 0.09
-        )
+        base = sum(factors[i].get(n, 0) * weights[i] for i in range(len(weights)))
         cs = streaks_raw[n]["current_streak"]
         if cs >= 6:
             base *= 0.50
