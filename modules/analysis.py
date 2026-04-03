@@ -724,37 +724,57 @@ FACTOR_NAMES = [
 
 def optimize_weights(df: pd.DataFrame, test_rounds: int = 30) -> list[float]:
     """
-    バックテストで重みを自動最適化する。
-    各要因の重みを微調整して、上位15番号の的中率が最大になる組み合わせを探す。
+    高速版: 要因を事前計算してキャッシュし、重みの組み合わせだけを高速に評価。
     """
     total = len(df)
     if total < test_rounds + 20:
         return DEFAULT_WEIGHTS
 
+    # ── 各テスト回の要因を事前計算（最大のボトルネックを解消）──
+    test_start = max(0, total - test_rounds)
+    precomputed = []  # [(actual_set, factors_matrix), ...]
+
+    for idx in range(test_start, total):
+        train_df = df.iloc[:idx]
+        if len(train_df) < 10:
+            continue
+        actual_row = df.iloc[idx]
+        actual = set(int(actual_row[f"n{i}"]) for i in range(1, 8))
+        factors = _get_all_factors(train_df)
+        # 番号 × 要因の行列に変換 (37 x 12)
+        matrix = {n: [factors[i].get(n, 0) for i in range(len(FACTOR_NAMES))] for n in ALL_NUMBERS}
+        precomputed.append((actual, matrix))
+
+    if not precomputed:
+        return DEFAULT_WEIGHTS
+
+    def _fast_eval(weights: list[float]) -> float:
+        """事前計算済み要因で高速評価"""
+        hits = 0
+        for actual, matrix in precomputed:
+            scores = {n: sum(matrix[n][i] * weights[i] for i in range(len(weights))) for n in ALL_NUMBERS}
+            top15 = set(sorted(scores, key=scores.get, reverse=True)[:15])
+            hits += len(top15 & actual)
+        return hits / len(precomputed)
+
     best_weights = DEFAULT_WEIGHTS[:]
-    best_score = -1
+    best_score = _fast_eval(best_weights)
 
-    # 現在の重みでベースラインスコアを計算
-    base_hits = _evaluate_weights(df, best_weights, test_rounds)
-    best_score = base_hits
-
-    # 各要因を±3%ずつ振って改善を探索（座標降下法）
-    for iteration in range(3):  # 3ラウンド
+    # 座標降下法（事前計算済みなので高速）
+    for iteration in range(3):
         improved = False
         for i in range(len(best_weights)):
-            for delta in [0.03, -0.03, 0.06, -0.06]:
+            for delta in [0.04, -0.04, 0.08, -0.08]:
                 trial = best_weights[:]
                 trial[i] = max(0.01, trial[i] + delta)
-                # 正規化
                 s = sum(trial)
                 trial = [w / s for w in trial]
 
-                hits = _evaluate_weights(df, trial, test_rounds)
-                if hits > best_score:
-                    best_score = hits
+                score = _fast_eval(trial)
+                if score > best_score:
+                    best_score = score
                     best_weights = trial
                     improved = True
-
         if not improved:
             break
 
@@ -763,7 +783,7 @@ def optimize_weights(df: pd.DataFrame, test_rounds: int = 30) -> list[float]:
         _OPTIMIZED_WEIGHTS_FILE.write_text(
             _json.dumps({
                 "weights": best_weights,
-                "score": best_score,
+                "score": round(best_score, 4),
                 "factors": FACTOR_NAMES,
             }, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -774,32 +794,9 @@ def optimize_weights(df: pd.DataFrame, test_rounds: int = 30) -> list[float]:
     return best_weights
 
 
-def _evaluate_weights(df: pd.DataFrame, weights: list[float], test_rounds: int) -> float:
-    """指定した重みでバックテストし、上位15番号の平均的中数を返す"""
-    total_hits = 0
-    test_start = max(0, len(df) - test_rounds)
-
-    for idx in range(test_start, len(df)):
-        train_df = df.iloc[:idx]
-        if len(train_df) < 10:
-            continue
-
-        actual_row = df.iloc[idx]
-        actual = set(int(actual_row[f"n{i}"]) for i in range(1, 8))
-
-        scores = _calc_score_with_weights(train_df, weights)
-        top15 = set(sorted(scores, key=scores.get, reverse=True)[:15])
-        total_hits += len(top15 & actual)
-
-    count = len(df) - test_start
-    return total_hits / count if count > 0 else 0
-
-
 def _calc_score_with_weights(df: pd.DataFrame, weights: list[float]) -> dict[int, float]:
     """指定した重みで12要因スコアを計算"""
-    total = len(df)
     factors = _get_all_factors(df)
-
     scores = {}
     for n in ALL_NUMBERS:
         s = sum(factors[i].get(n, 0) * weights[i] for i in range(len(weights)))

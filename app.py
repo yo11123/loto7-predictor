@@ -872,7 +872,7 @@ with tab_pred:
             "初回は数十秒かかりますが、結果は保存されて次回以降の予測に反映されます。"
         )
 
-        _opt_rounds = st.slider("学習に使う回数", 10, 50, 30, key="opt_rounds")
+        _opt_rounds = st.slider("学習に使う回数", 5, 30, 15, key="opt_rounds")
 
         if st.button("最適化を実行", key="btn_opt", type="primary"):
             with st.spinner(f"直近 {_opt_rounds} 回で12要因の重みを最適化中...（数十秒かかります）"):
