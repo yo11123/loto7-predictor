@@ -176,92 +176,108 @@ def generate_combinations(
     n: int = 10,
 ) -> list[list[int]]:
     """
-    強化版：分析スコアに基づく決定的な組み合わせ生成。
+    カバレッジ重視の組み合わせ生成。
 
-    スコア算出:
-    1. 各番号の総合スコア合計（頻度+活性度+未出現+共起力+トレンド）
-    2. 組み合わせ内のペア共起ボーナス（よく一緒に出るペアが多い組を優遇）
-    3. パターン適合ボーナス（奇偶・高低・合計値・連番が典型範囲内）
-
-    フィルタ:
-    - 過去の当選組を除外
-    - パターン適合が2条件未満の組を除外
+    3段階のアプローチで多様な組み合わせを保証:
+    1. 番号プールをTier分け（S/A/B/C）し各Tierから必ず選出
+    2. 候補をスコア順にソートした後、貪欲に多様性選択（最低差分5）
+    3. カバレッジボーナス: まだ選ばれていない番号を含む組を優遇
     """
     scores = get_number_score(df)
     past = _get_past_winning_sets(df)
     pattern = get_typical_pattern(df)
     pair_count = get_cooccurrence(df)
 
-    # 上位番号プールサイズを調整
-    if n <= 10:
-        top_k = 15
-    elif n <= 50:
-        top_k = 18
-    elif n <= 100:
-        top_k = 21
-    else:
-        top_k = 24
-
     ranked = sorted(ALL_NUMBERS, key=lambda x: scores[x], reverse=True)
+
+    # Tier分け: S(top10), A(11-20), B(21-30), C(31-37)
+    tier_s = set(ranked[:10])
+    tier_a = set(ranked[10:20])
+    tier_b = set(ranked[20:30])
+    tier_c = set(ranked[30:])
+
+    # プールサイズ（必要数に応じて広げる）
+    if n <= 10:
+        top_k = 18
+    elif n <= 50:
+        top_k = 23
+    elif n <= 100:
+        top_k = 28
+    else:
+        top_k = 32
     pool = ranked[:top_k]
 
-    # ペア共起の最大値（正規化用）
     max_pair = max(pair_count.values()) if pair_count else 1
 
+    # 全候補をスコア付きで生成
     candidates = []
     for combo in combinations(pool, MAIN_COUNT):
         if combo in past:
             continue
 
-        # パターン適合チェック
         fit = check_pattern_fit(list(combo), pattern)
         if fit["fit_count"] < 2:
-            continue  # 条件2つ未満は除外
+            continue
 
-        # 基本スコア: 各番号の総合スコア合計
         base = _combo_score(combo, scores)
 
-        # ペア共起ボーナス: 組内の全ペアの共起回数を合計して正規化
         pair_bonus = 0.0
         for pair in combinations(combo, 2):
             pair_bonus += pair_count.get(pair, 0)
-        total_pairs = MAIN_COUNT * (MAIN_COUNT - 1) / 2  # 21 ペア
+        total_pairs = MAIN_COUNT * (MAIN_COUNT - 1) / 2
         pair_bonus_norm = pair_bonus / (total_pairs * max_pair)
 
-        # パターン適合ボーナス
-        pattern_bonus = fit["fit_count"] / 4.0  # 0.0 ~ 1.0
+        pattern_bonus = fit["fit_count"] / 4.0
 
-        # 最終スコア = 基本50% + 共起25% + パターン25%
-        final_score = base * 0.50 + pair_bonus_norm * 0.25 + pattern_bonus * 0.25
+        # Tier多様性ボーナス: 複数Tierから選ばれているほど高い
+        combo_set = set(combo)
+        tiers_used = sum([
+            bool(combo_set & tier_s),
+            bool(combo_set & tier_a),
+            bool(combo_set & tier_b),
+            bool(combo_set & tier_c),
+        ])
+        tier_bonus = tiers_used / 4.0  # 0.25〜1.0
 
+        # 最終スコア = 基本40% + 共起15% + パターン20% + Tier多様性25%
+        final_score = base * 0.40 + pair_bonus_norm * 0.15 + pattern_bonus * 0.20 + tier_bonus * 0.25
         candidates.append((combo, final_score))
 
     candidates.sort(key=lambda x: x[1], reverse=True)
 
-    # ── 多様性を確保した貪欲選択 ──
-    # 既に選んだ組と最低 min_diff 個以上異なる番号を持つ組のみ採用
-    # 要求数を満たせない場合は段階的に緩和する
-    seen: set[tuple[int, ...]] = set()
+    # ── カバレッジ重視の貪欲選択 ──
     results: list[list[int]] = []
+    seen: set[tuple[int, ...]] = set()
+    used_numbers: set[int] = set()  # 選択済み組に含まれる番号
 
-    for min_diff in (3, 2, 1):
-        for combo, _ in candidates:
+    for min_diff in (5, 4, 3, 2):
+        for combo, score in candidates:
             key = tuple(sorted(combo))
             if key in seen:
                 continue
 
-            # 既存の全組と比較して多様性チェック
-            is_diverse = True
             combo_set = set(combo)
+
+            # 多様性チェック: 既存の全組と min_diff 個以上異なる
+            is_diverse = True
             for existing in results:
                 diff_count = len(combo_set.symmetric_difference(set(existing))) // 2
                 if diff_count < min_diff:
                     is_diverse = False
                     break
 
-            if is_diverse:
-                seen.add(key)
-                results.append(list(key))
+            if not is_diverse:
+                continue
+
+            # カバレッジボーナスで再スコア: まだ使われていない番号を含むほど優先
+            new_nums = combo_set - used_numbers
+            coverage_bonus = len(new_nums) / MAIN_COUNT  # 0〜1
+            adjusted = score + coverage_bonus * 0.15
+
+            seen.add(key)
+            results.append(list(key))
+            used_numbers.update(combo_set)
+
             if len(results) >= n:
                 break
         if len(results) >= n:
