@@ -631,30 +631,33 @@ def get_pattern_match_score(df: pd.DataFrame, window: int = 5) -> dict[int, floa
     if len(all_draws) < window + 10:
         return {n: 0.5 for n in ALL_NUMBERS}
 
-    # 直近パターン（各回の出目セット）
-    recent_pattern = [set(int(x) for x in d) for d in all_draws[-window:]]
+    # 全回の出目セットを事前計算
+    draw_sets = [frozenset(int(x) for x in d) for d in all_draws]
+    recent_pattern = draw_sets[-window:]
 
-    # 過去の全ウィンドウとの類似度を計算
     scores_accum = {n: 0.0 for n in ALL_NUMBERS}
     total_weight = 0.0
 
-    for start in range(len(all_draws) - window - 1):
-        past_pattern = [set(int(x) for x in d) for d in all_draws[start:start + window]]
+    # 直近200回分だけ検索（全履歴は重すぎる）
+    search_end = max(0, len(draw_sets) - window - 1)
+    search_start = max(0, search_end - 200)
 
+    for start in range(search_start, search_end):
         # 類似度: 各回のJaccard類似度の平均
         sim_sum = 0.0
-        for rp, pp in zip(recent_pattern, past_pattern):
+        for i in range(window):
+            rp = recent_pattern[i]
+            pp = draw_sets[start + i]
             inter = len(rp & pp)
             union = len(rp | pp)
             sim_sum += inter / union if union > 0 else 0
         similarity = sim_sum / window
 
-        if similarity < 0.15:  # 類似度が低すぎるものは無視
+        if similarity < 0.15:
             continue
 
-        # その次の回の番号にスコア加算（類似度で重み付け）
-        next_draw = set(int(x) for x in all_draws[start + window])
-        weight = similarity ** 2  # 二乗で強い類似を重視
+        next_draw = draw_sets[start + window]
+        weight = similarity ** 2
         for n in next_draw:
             scores_accum[n] += weight
         total_weight += weight
@@ -1169,7 +1172,7 @@ def run_backtest(df: pd.DataFrame, last_n: int = 5) -> list[dict]:
         hits_top15 = len(set(top15) & actual_set)
 
         try:
-            combos = generate_combinations(train_df, n=100)
+            combos = generate_combinations(train_df, n=20)
         except Exception:
             combos = []
 

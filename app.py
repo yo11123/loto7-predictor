@@ -910,7 +910,7 @@ with tab_pred:
     with st.expander("📊 予測精度の検証（過去データでバックテスト）", expanded=False):
         st.caption("過去の抽選を「予測→結果比較」でシミュレーションし、分析の精度を検証します。")
 
-        _bt_n = st.slider("バックテストする回数", 3, 20, 5, key="bt_n")
+        _bt_n = st.slider("バックテストする回数", 3, 10, 3, key="bt_n")
 
         if st.button("バックテスト実行", key="btn_bt"):
             with st.spinner(f"直近 {_bt_n} 回分のバックテスト中..."):
